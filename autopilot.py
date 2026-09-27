@@ -27,6 +27,9 @@ class AutoBounty:
     def __init__(self):
         self.cfg = scopelib.load_config(CFG_PATH)
         self.db = DB(self.cfg["runner"]["state_db"])
+        import jobs
+        jobs.ensure(self.db)
+        scopelib.load_programs(self.cfg, self.db)   # seed programs from config.yaml
         self.paused = threading.Event()
         self.force_scan = threading.Event()
         self.cycle = 0
@@ -71,13 +74,15 @@ class AutoBounty:
                         continue
                     cid = str(msg["chat"]["id"])
                     cur = self.owner_chat()
-                    if cur is None and msg.get("text", "").strip().startswith(("/", "!")):
+                    if cur is None:
+                        # ANY first message bootstraps the owner (Telegram bots
+                        # cannot initiate conversations, so this is the only way
+                        # to learn where to send reports).
                         self.set_owner_chat(cid)
-                        cur = cid
                         notify.send(
-                            "✅ *AutoBounty* under your control.\n"
+                            "✅ *AutoBounty* reporting channel established.\n"
                             "You are now the owner. Commands: /status /stats "
-                            "/findings /pause /resume /scan", cid)
+                            "/findings /revenue /pause /resume /scan", cid)
                         continue
                     if cur != cid:
                         continue
@@ -268,6 +273,16 @@ class AutoBounty:
         return q
 
     # -------------------------------------------------------------- loop
+    def _save_state(self):
+        """Snapshot to state.json after each phase so a job timeout still leaves
+        committable progress on the runner."""
+        try:
+            sf = os.path.join(self.cfg["runner"].get("state_dir", "data"), "state.json")
+            live, found = self.db.export_state(sf)
+            print(f"[state] snapshot {live} live hosts, {found} findings", flush=True)
+        except Exception as e:
+            print("[state] export error:", e, flush=True)
+
     def cycle_once(self):
         self.cycle += 1
         print(f"\n=== AutoBounty cycle {self.cycle} "
@@ -277,12 +292,14 @@ class AutoBounty:
         except Exception as e:
             self.db.log_run("recon", "error", repr(e))
             print("[recon] ERROR", e, flush=True)
+        self._save_state()
         try:
             new = self.phase_scan()
         except Exception as e:
             self.db.log_run("scan", "error", repr(e))
             print("[scan] ERROR", e, flush=True)
             new = []
+        self._save_state()
         try:
             q = self.phase_triage(new)
             print(f"[enqueue] {q} LLM jobs queued for sub-agents", flush=True)

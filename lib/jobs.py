@@ -69,6 +69,7 @@ def complete(db, job_id, result, ok=True):
 
 def stale_running(db, max_age_s=900):
     """Reclaim jobs whose worker died."""
+    ensure(db)
     cutoff = int(time.time()) - max_age_s
     db.conn.execute(
         "UPDATE jobs SET status='pending', worker=NULL WHERE status='running' "

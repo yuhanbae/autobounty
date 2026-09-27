@@ -26,6 +26,7 @@ class SubAgent:
         self.kinds = kinds or ["triage", "draft", "verify", "research", "enrich"]
         self.cfg = scopelib.load_config(CFG_PATH)
         self.db = DB(self.cfg["runner"]["state_db"])
+        jobs.ensure(self.db)          # schema must exist before stale_running() polls it
         self.handled = 0
 
     # ------------------------------------------------------------- handlers

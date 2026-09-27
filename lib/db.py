@@ -217,11 +217,13 @@ class DB:
                             "enabled": r["enabled"]}
                  for r in self.conn.execute("SELECT * FROM programs")}
         revenue = [dict(r) for r in self.conn.execute("SELECT * FROM revenue")]
+        self.conn.execute("CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT)")
+        kv = {r["key"]: r["value"] for r in self.conn.execute("SELECT * FROM kv")}
         import json as _json
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with open(path, "w") as f:
             _json.dump({"live_hosts": live, "findings": findings,
-                        "programs": progs, "revenue": revenue,
+                        "programs": progs, "revenue": revenue, "kv": kv,
                         "exported_at": int(time.time())}, f, default=str)
         return len(live), len(findings)
 
@@ -231,8 +233,13 @@ class DB:
             return 0, 0
         with open(path) as f:
             s = _json.load(f)
-        for p in s.get("programs", {}).values():
-            pass  # program rows are re-seeded from config.yaml by the runner
+        for p in s.get("programs", {}).items():
+            name, meta = p
+            self.conn.execute(
+                "UPDATE programs SET last_recon_at=?, last_scan_at=?, enabled=? "
+                "WHERE name=?",
+                (meta.get("last_recon_at"), meta.get("last_scan_at"),
+                 int(meta.get("enabled", 1)), name))
         for h in s.get("live_hosts", []):
             self.conn.execute(
                 "INSERT OR IGNORE INTO hosts(program,host,source,first_seen,last_seen,"
@@ -255,6 +262,10 @@ class DB:
             self.conn.execute(
                 "INSERT OR IGNORE INTO revenue(amount_usd,source,note,ts) VALUES(?,?,?,?)",
                 (float(r["amount_usd"]), r.get("source"), r.get("note"), int(r["ts"])))
+        self.conn.execute("CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT)")
+        for k, v in (s.get("kv") or {}).items():
+            self.conn.execute(
+                "INSERT OR IGNORE INTO kv(key,value) VALUES(?,?)", (k, str(v)))
         self.conn.commit()
         return len(s.get("live_hosts", [])), len(s.get("findings", []))
 
