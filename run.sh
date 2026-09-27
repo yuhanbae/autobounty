@@ -4,6 +4,8 @@
 set -u
 cd "$(dirname "$0")"
 export PATH="$HOME/go/bin:$PATH"
+# Dedicated bot for autobounty reports (falls back to TELEGRAM_BOT_TOKEN)
+export AUTOBOUNTY_BOT_TOKEN="${AUTOBOUNTY_BOT_TOKEN:-8921167672:AAFBjdlPlGgnBfJ2uCaAIE8ysh0aIpdOPHc}"
 LOGS=logs
 mkdir -p "$LOGS"
 

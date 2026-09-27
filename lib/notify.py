@@ -6,9 +6,15 @@ sys.path.insert(0, os.path.dirname(__file__))
 API = "https://api.telegram.org/bot{}/{}"
 
 
+def _token():
+    # Dedicated autobounty bot; fall back to shared token if not set.
+    return (os.environ.get("AUTOBOUNTY_BOT_TOKEN")
+            or os.environ.get("TELEGRAM_BOT_TOKEN"))
+
+
 def send(text, chat_id=None, tries=2):
     import requests
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    token = _token()
     if not token:
         return False
     cid = chat_id or os.environ.get("TELEGRAM_CHAT_ID")

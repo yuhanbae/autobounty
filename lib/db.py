@@ -42,6 +42,10 @@ CREATE TABLE IF NOT EXISTS runs(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   phase TEXT, started_at INTEGER, ended_at INTEGER, status TEXT, detail TEXT
 );
+CREATE TABLE IF NOT EXISTS kv(
+  key TEXT PRIMARY KEY,
+  value TEXT
+);
 """
 
 

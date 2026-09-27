@@ -39,8 +39,11 @@ class AutoBounty:
         c = os.environ.get("TELEGRAM_CHAT_ID")
         if c:
             return c
-        r = self.db.conn.execute(
-            "SELECT value FROM kv WHERE key='owner_chat'").fetchone()
+        try:
+            r = self.db.conn.execute(
+                "SELECT value FROM kv WHERE key='owner_chat'").fetchone()
+        except Exception:
+            r = None
         return r["value"] if r else None
 
     def set_owner_chat(self, cid):
@@ -54,13 +57,25 @@ class AutoBounty:
     def bot_thread(self):
         """Long-poll Telegram for owner commands."""
         import requests, time as _t
-        token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        token = (os.environ.get("AUTOBOUNTY_BOT_TOKEN")
+                 or os.environ.get("TELEGRAM_BOT_TOKEN"))
         if not token:
             return
+        # ensure kv exists up-front so owner_chat() can never crash
+        try:
+            self.db.conn.execute(
+                "CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT)")
+            self.db.conn.commit()
+        except Exception:
+            pass
         base = f"https://api.telegram.org/bot{token}"
         offset = 0
+        hb = os.path.join(self.cfg["runner"].get("state_dir", "data"),
+                          "bot_heartbeat.txt")
         while True:
             try:
+                with open(hb, "w") as f:   # liveness heartbeat for ops
+                    f.write(str(int(time.time())))
                 r = requests.get(f"{base}/getUpdates",
                                  params={"offset": offset, "timeout": 25},
                                  timeout=35)
@@ -68,25 +83,31 @@ class AutoBounty:
                     _t.sleep(10)
                     continue
                 for upd in r.json().get("result", []):
-                    offset = upd["update_id"] + 1
                     msg = upd.get("message") or upd.get("edited_message")
                     if not msg or msg.get("from", {}).get("is_bot"):
+                        offset = upd["update_id"] + 1   # discard non-message
                         continue
                     cid = str(msg["chat"]["id"])
-                    cur = self.owner_chat()
-                    if cur is None:
-                        # ANY first message bootstraps the owner (Telegram bots
-                        # cannot initiate conversations, so this is the only way
-                        # to learn where to send reports).
-                        self.set_owner_chat(cid)
-                        notify.send(
-                            "✅ *AutoBounty* reporting channel established.\n"
-                            "You are now the owner. Commands: /status /stats "
-                            "/findings /revenue /pause /resume /scan", cid)
-                        continue
-                    if cur != cid:
-                        continue
-                    self.handle_command(msg.get("text", "").strip().split(), cid)
+                    try:
+                        cur = self.owner_chat()
+                        if cur is None:
+                            # ANY first message bootstraps the owner (Telegram bots
+                            # cannot initiate conversations, so this is the only way
+                            # to learn where to send reports).
+                            self.set_owner_chat(cid)
+                            notify.send(
+                                "✅ *AutoBounty* reporting channel established.\n"
+                                "You are now the owner. Commands: /status /stats "
+                                "/findings /revenue /pause /resume /scan", cid)
+                        elif cur == cid:
+                            self.handle_command(
+                                msg.get("text", "").strip().split(), cid)
+                        # else: someone else's message -> ignore (no bootstrap)
+                    except Exception:
+                        pass
+                    # advance offset only AFTER processing, so a transient
+                    # failure retries the update instead of swallowing it
+                    offset = upd["update_id"] + 1
             except Exception:
                 _t.sleep(10)
 
