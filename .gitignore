@@ -1,0 +1,22 @@
+# secrets — never commit
+auth.json
+*.key
+.env
+
+# the raw host-candidate DB is regenerable and huge; the compact state.json
+# (live hosts + findings + progress) is what the runners share instead
+data/autobounty.db*
+
+# scratch / test artifacts
+data/alltags.txt
+data/tags_clean.txt
+data/probe2.txt
+smoke_*.py
+manual_scan.py
+focused_scan.py
+e2e_test.py
+
+# stray files
+-
+__pycache__/
+*.pyc

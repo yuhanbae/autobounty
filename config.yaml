@@ -1,0 +1,157 @@
+# ==========================================================================
+# AutoBounty — autonomous (authorized) bug-bounty pipeline
+# Only programs with an explicit public policy permitting security research
+# are scanned. Every host is scope-checked BEFORE any request is sent.
+# ==========================================================================
+
+runner:
+  state_db:        ./data/autobounty.db
+  state_dir:       ./data          # shared state.json for the runner mesh
+  inventory_dir:   ./inventory
+  reports_dir:     ./reports
+  logs_dir:        ./logs
+  max_cpu_threads: 3            # project rule: cap at 3
+  phase_interval_minutes: 90    # full-cycle cadence
+  # Per-program politeness: requests/sec ceiling
+  global_rps: 30
+
+recon:
+  # subfinder passive sources only (no API keys configured)
+  # v2.16 is passive-by-default (the -passive flag was removed)
+  subfinder_args: ["-silent", "-all"]
+  dnsx_args:      ["-silent", "-a"]
+  httpx_args:     ["-silent", "-status-code", "-title", "-tech-detect", "-cdn",
+                   "-ip", "-timeout", "6", "-no-color"]
+  httpx_threads:  10          # network I/O concurrency (CPU stays capped at 3)
+  httpx_rps:      40
+  max_hosts_per_program: 400
+  recon_every_hours: 12        # re-enumerate a program at most this often
+
+scan:
+  # nuclei template selection — non-destructive, research-safe
+  # Verified against `nuclei -tgl`: the real tags are `exposure`/`vuln`/`misconfig`,
+  # NOT `exposures`/`vulnerabilities`/`misconfiguration` (those filters match nothing).
+  tags:           ["cve", "vuln", "exposure", "exposures", "misconfig",
+                   "panel", "default-login", "disclosure", "unauth"]
+  exclude_tags:   ["intrusive"]
+  severity:       ["medium", "high", "critical"]
+  nuclei_rps:     80            # network-bound; CPU cap of 3 is respected
+  nuclei_concurrency: 20
+  scan_batch:     15           # hosts per nuclei invocation (progress accumulates)
+  timeout_seconds: 1500
+  # findings that are almost always noise on public programs
+  drop_templates:
+    - "technologies-detect"      # tech fingerprint, not a vuln
+    - "wappalyzer"               # tech fingerprint
+    - "cdn-cname-detect"
+
+notify:
+  telegram_enabled: true
+  alert_min_severity: "high"     # only high+ push to telegram
+  progress_interval_minutes: 15   # periodic progress report to the owner
+
+# Bounty value anchors (conservative public-program medians) used ONLY to estimate
+# POTENTIAL value of triaged findings. Collected revenue is tracked separately and
+# is only ever recorded when a real payout lands.
+economics:
+  est_bounty_usd:
+    critical: 5000
+    high:     1500
+    medium:   400
+    low:      100
+
+# --------------------------------------------------------------------------
+# Authorized program list. "policy" field documents the authorization basis.
+# scope: exact domain or wildcard (*.example.com). exclusions: never scan.
+# --------------------------------------------------------------------------
+programs:
+  - name: "GitHub"
+    platform: "GitHub Security"
+    policy: "https://bounty.github.com/ — public program, bounties for vulns in GitHub-owned properties"
+    scope: ["*.github.com", "*.github.io", "github.com", "*.githubassets.com", "*.githubusercontent.com"]
+    exclusions: ["support.github.com", "docs.github.com", "resources.github.com", "partners.github.com"]
+    rps: 10
+
+  - name: "GitLab"
+    platform: "HackerOne"
+    policy: "https://hackerone.com/gitlab — public program, broad *.gitlab.com scope"
+    scope: ["*.gitlab.com", "gitlab.com"]
+    exclusions: []
+    rps: 10
+
+  - name: "Uber"
+    platform: "HackerOne"
+    policy: "https://hackerone.com/uber — public program, *.uber.com + *.ubereats.com"
+    scope: ["*.uber.com", "*.ubereats.com", "uber.com"]
+    exclusions: []
+    rps: 10
+
+  - name: "Shopify"
+    platform: "HackerOne"
+    policy: "https://hackerone.com/shopify — public program, *.shopify.com + myshopify.com shops"
+    scope: ["*.shopify.com", "*.myshopify.com", "shopify.com"]
+    exclusions: []
+    rps: 10
+
+  - name: "Tesla"
+    platform: "HackerOne"
+    policy: "https://hackerone.com/tesla — public program, *.tesla.com + *.teslamotors.com"
+    scope: ["*.tesla.com", "*.teslamotors.com"]
+    exclusions: []
+    rps: 10
+
+  - name: "Yahoo"
+    platform: "HackerOne"
+    policy: "https://hackerone.com/yahoo — public program, *.yahoo.com + subdomains"
+    scope: ["*.yahoo.com", "*.yahoo.net"]
+    exclusions: []
+    rps: 10
+
+  - name: "DigitalOcean"
+    platform: "HackerOne"
+    policy: "https://hackerone.com/digitalocean — public program, *.digitalocean.com"
+    scope: ["*.digitalocean.com"]
+    exclusions: []
+    rps: 10
+
+  - name: "Cloudflare"
+    platform: "HackerOne"
+    policy: "https://hackerone.com/cloudflare — public program, *.cloudflare.com"
+    scope: ["*.cloudflare.com"]
+    exclusions: []
+    rps: 10
+
+  - name: "Coinbase"
+    platform: "HackerOne"
+    policy: "https://hackerone.com/coinbase — public program, *.coinbase.com"
+    scope: ["*.coinbase.com", "*.pro.coinbase.com"]
+    exclusions: []
+    rps: 8
+
+  - name: "Dropbox"
+    platform: "HackerOne"
+    policy: "https://hackerone.com/dropbox — public program, *.dropbox.com"
+    scope: ["*.dropbox.com", "*.dropboxapi.com"]
+    exclusions: []
+    rps: 10
+
+  - name: "Slack"
+    platform: "HackerOne"
+    policy: "https://hackerone.com/slack — public program, *.slack.com"
+    scope: ["*.slack.com", "*.slackb.com"]
+    exclusions: []
+    rps: 10
+
+  - name: "Atlassian"
+    platform: "HackerOne"
+    policy: "https://hackerone.com/atlassian — public program, *.atlassian.com"
+    scope: ["*.atlassian.com"]
+    exclusions: []
+    rps: 10
+
+  - name: "Red Hat"
+    platform: "Bugcrowd"
+    policy: "https://bugcrowd.com/redhat — public program, *.redhat.com"
+    scope: ["*.redhat.com"]
+    exclusions: []
+    rps: 10

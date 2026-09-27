@@ -1,0 +1,83 @@
+name: AutoBounty cycle
+
+on:
+  schedule:
+    # every 20 minutes; GitHub may delay during high load. The run commits
+    # results back to the repo, which also keeps the scheduled workflow alive.
+    - cron: "*/20 * * * *"
+  workflow_dispatch: {}
+
+# one cycle at a time — the runner commits state, so parallel runs would conflict
+concurrency:
+  group: autobounty-cycle
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  cycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AGNES_API_KEY: ${{ secrets.AGNES_API_KEY }}
+      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      RUNNER_NAME: github-actions
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - uses: actions/setup-python@v5
+        with:
+          { python-version: "3.12" }
+
+      - name: Install Python deps
+        run: pip install -q requests pyyaml
+
+      - name: Install ProjectDiscovery tools
+        run: |
+          for repo in \
+            github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest \
+            github.com/projectdiscovery/dnsx/cmd/dnsx@latest \
+            github.com/projectdiscovery/httpx/cmd/httpx@latest \
+            github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest ; do
+              go install -v "$repo" || echo "WARN install failed: $repo"
+          done
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch nuclei templates
+        run: |
+          if [ ! -d nuclei-templates/.git ]; then
+            git clone --depth 1 --filter=blob:none --sparse https://github.com/projectdiscovery/nuclei-templates.git
+            cd nuclei-templates
+            git sparse-checkout set http dns ssl network cves vulnerabilities exposures misconfiguration
+          fi
+
+      - name: Run one pipeline cycle
+        run: |
+          mkdir -p data reports logs
+          python3 autopilot.py --once 2>&1 | tee logs/cycle.log
+
+      - name: Run idle sub-agents on any queued LLM jobs
+        run: |
+          for i in 1 2; do
+            timeout 500 python3 subagent.py "actions-$i" triage draft verify research 2>&1 \
+              | tee -a logs/subagent-$i.log || true
+          done
+
+      - name: Commit state + findings back to the repo
+        run: |
+          git config user.name  "autobounty-bot"
+          git config user.email "autobounty-bot@users.noreply.github.com"
+          git add data reports logs INDEX.md 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "no changes this cycle"
+          else
+            git commit -m "cycle: $(date -u +%Y-%m-%dT%H:%MZ) — $(git diff --cached --name-only | wc -l) files"
+            git push
+          fi

@@ -1,0 +1,13 @@
+[smoke] subfinder +1647 subdomains (84s)
+[smoke] total in-scope hosts: 1647
+[smoke] httpx probed 411 (7376s)
+[smoke] live hosts: 333
+    403 static-assets.tesla.com | Access Denied | 
+    404 npute-eng.euw1.vn.cloud.tesla.com | 404 Not Found | 
+    403 autobidder-preprd.powerhub.energy.tesla.com | Access Denied | 
+    403 static-assets-contactus-comm-preferences.tesla.com | Access Denied | 
+    403 livestreamapi.tesla.com | Access Denied | 
+    403 click.email.tesla.com | Access Denied | 
+    403 exp-zcp-cloud-na-itmfg-staging.tesla.com | Access Denied | 
+    403 profile.tesla.com | Access Denied | 
+[smoke] DONE

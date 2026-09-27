@@ -1,0 +1,6 @@
+[supervisor] Sun Sep 27 17:58:07 WIB 2026 — launching AutoBounty (1 autopilot + 3 sub-agents)
+[supervisor] started autopilot pid 19753 -> logs/autopilot.log
+[supervisor] started agent-1 pid 19932 -> logs/agent-1.log
+[supervisor] started agent-2 pid 19934 -> logs/agent-2.log
+[supervisor] started agent-3 pid 19946 -> logs/agent-3.log
+[supervisor] all launched; watching
