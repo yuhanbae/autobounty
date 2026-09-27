@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+  autopilot:
+    build:
+      context: .
+      dockerfile: hf-space/Dockerfile
+    container_name: autobounty-autopilot
+    environment:
+      - AGNES_API_KEY=${AGNES_API_KEY}
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - GIT_REPO_URL=https://x-access-token:${GITHUB_TOKEN}@github.com/yuhanbae/autobounty
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+      - ./logs:/app/logs
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '3'
+          memory: 2G
+
+  subagent-1:
+    build:
+      context: .
+      dockerfile: hf-space/Dockerfile
+    container_name: autobounty-subagent-1
+    command: python3 subagent.py agent-1 triage draft verify research
+    environment:
+      - AGNES_API_KEY=${AGNES_API_KEY}
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+    restart: unless-stopped
+    depends_on:
+      - autopilot
+
+  subagent-2:
+    build:
+      context: .
+      dockerfile: hf-space/Dockerfile
+    container_name: autobounty-subagent-2
+    command: python3 subagent.py agent-2 triage draft verify research
+    environment:
+      - AGNES_API_KEY=${AGNES_API_KEY}
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+    restart: unless-stopped
+    depends_on:
+      - autopilot
+
+  subagent-3:
+    build:
+      context: .
+      dockerfile: hf-space/Dockerfile
+    container_name: autobounty-subagent-3
+    command: python3 subagent.py agent-3 triage draft verify research
+    environment:
+      - AGNES_API_KEY=${AGNES_API_KEY}
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+    restart: unless-stopped
+    depends_on:
+      - autopilot
+
+volumes:
+  data:
+  reports:
+  logs:

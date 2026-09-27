@@ -1,0 +1,21 @@
+[Unit]
+Description=AutoBounty Autonomous Bug Bounty Pipeline
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/autobounty
+ExecStart=/usr/bin/bash /opt/autobounty/run.sh
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=/opt/autobounty/.env
+# Resource limits
+CPUQuota=300%
+MemoryLimit=3G
+
+[Install]
+WantedBy=multi-user.target
