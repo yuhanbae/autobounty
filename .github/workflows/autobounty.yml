@@ -18,7 +18,7 @@ permissions:
 jobs:
   cycle:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       AGNES_API_KEY: ${{ secrets.AGNES_API_KEY }}
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
