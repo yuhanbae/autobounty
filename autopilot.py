@@ -209,6 +209,9 @@ class AutoBounty:
 
     # -------------------------------------------------------------- phases
     def phase_recon(self):
+        if getattr(self, "skip_recon", False):
+            print("[recon] skipped (--no-recon)", flush=True)
+            return 0
         programs = self.db.programs()
         every_h = self.cfg["recon"].get("recon_every_hours", 12)
         total_hosts = 0
@@ -243,10 +246,17 @@ class AutoBounty:
         for p in programs:
             if self.paused.is_set():
                 return new_all
-            # probe anything not yet probed
-            unprobed = [h for h in self.db.all_hosts(p["name"]) if h["status"] is None]
-            if unprobed:
-                recon.resolve_and_probe(self.db, p, self.cfg, len(unprobed))
+            # backfill-probe a BOUNDED slice of unprobed hosts. The old code fed
+            # the entire unprobed list (350k+ hosts) to one dnsx+httpx pair, which
+            # always timed out and discarded everything -> scans never happened.
+            max_backfill = int(self.cfg["recon"].get("max_hosts_per_program", 400))
+            n_unprobed = self.db.conn.execute(
+                "SELECT COUNT(*) c FROM hosts WHERE program=? AND in_scope=1 "
+                "AND status IS NULL", (p["name"],)).fetchone()["c"]
+            if n_unprobed:
+                print(f"[scan] {p['name']}: backfill-probing {min(n_unprobed, max_backfill)} "
+                      f"of {n_unprobed} unprobed hosts", flush=True)
+                recon.resolve_and_probe(self.db, p, self.cfg, max_backfill)
             # pick the oldest-scanned live hosts (NULL scanned_at sorts first)
             rows = self.db.conn.execute(
                 "SELECT * FROM hosts WHERE program=? AND in_scope=1 AND status IS NOT NULL "
@@ -349,7 +359,8 @@ class AutoBounty:
         after = self.db.conn.execute("SELECT COUNT(*) c FROM hosts").fetchone()["c"]
         print(f"[prune] hosts {before} -> {after}", flush=True)
 
-    def run(self, once=False):
+    def run(self, once=False, skip_recon=False):
+        self.skip_recon = skip_recon
         state_file = os.path.join(self.cfg["runner"].get("state_dir", "data"),
                                   "state.json")
         self.db.import_state(state_file)          # merge progress from other runners
@@ -379,4 +390,4 @@ class AutoBounty:
 if __name__ == "__main__":
     once = "--once" in sys.argv
     ab = AutoBounty()
-    ab.run(once=once)
+    ab.run(once=once, skip_recon="--no-recon" in sys.argv)

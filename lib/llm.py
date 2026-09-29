@@ -26,20 +26,22 @@ _AUTH = os.path.expanduser("~/.pi/agent/auth.json")
 
 
 def _keys():
-    """Keys come from env first (GitHub Actions secrets), then the local
-    auth.json on the Termux box."""
+    """Keys come from env first (GitHub Actions / HF Space secrets), then the
+    local auth.json on the Termux box."""
     import os
+    atria = os.environ.get("ATRIA_API_KEY")
     agnes = os.environ.get("AGNES_API_KEY")
     nvidia = os.environ.get("NVIDIA_API_KEY")
-    if not agnes or not nvidia:
+    if not (atria and agnes and nvidia):
         try:
             with open(_AUTH) as f:
                 d = json.load(f)
+            atria = atria or d.get("atria", {}).get("key")
             agnes = agnes or d.get("agnes", {}).get("key")
             nvidia = nvidia or d.get("nvidia", {}).get("key")
         except Exception:
             pass
-    return agnes, nvidia
+    return atria, agnes, nvidia
 
 
 def _chat(url, key, model, messages, max_tokens, temperature, timeout):
@@ -57,8 +59,18 @@ def _chat(url, key, model, messages, max_tokens, temperature, timeout):
     return (msg.get("content") or msg.get("reasoning_content") or "").strip() or None
 
 
+def atria(messages, model, max_tokens, temperature, timeout):
+    """Atria (Atria-Dawn-Preview) — free, fast, 256k context, reasoning-capable.
+    MAIN agent for all tiers on this account."""
+    key, _, _ = _keys()
+    if not key:
+        return None
+    return _chat("https://api.atria-asi.ai/v1/chat/completions", key, model,
+                 messages, max_tokens, temperature, timeout)
+
+
 def agnes(messages, model, max_tokens, temperature, timeout):
-    key, _ = _keys()
+    _, key, _ = _keys()
     if not key:
         return None
     return _chat("https://apihub.agnes-ai.com/v1/chat/completions", key, model,
@@ -66,7 +78,7 @@ def agnes(messages, model, max_tokens, temperature, timeout):
 
 
 def nim(messages, model, max_tokens, temperature, timeout):
-    _, key = _keys()
+    _, _, key = _keys()
     if not key:
         return None
     return _chat("https://integrate.api.nvidia.com/v1/chat/completions", key, model,
@@ -75,13 +87,18 @@ def nim(messages, model, max_tokens, temperature, timeout):
 
 # Only NIM models proven working on this account (see skills/telepi-models-json).
 TIERS = {
-    "fast": [("agnes", "agnes-3.0-flash"), ("agnes", "agnes-2.5-pro"),
-             ("nim", "z-ai/glm-5.3-flash"), ("nim", "moonshotai/kimi-k3")],
-    "deep": [("nim", "moonshotai/kimi-k3"), ("nim", "nvidia/nemotron-3-super-120b-a12b"),
+    # Atria-Dawn-Preview is the MAIN agent: free, fast, 256k context, reasoning.
+    # Everything else is fallback only.
+    "fast": [("atria", "Atria-Dawn-Preview"), ("agnes", "agnes-3.0-flash"),
+             ("agnes", "agnes-2.5-pro"), ("nim", "z-ai/glm-5.3-flash"),
+             ("nim", "moonshotai/kimi-k3")],
+    "deep": [("atria", "Atria-Dawn-Preview"), ("nim", "moonshotai/kimi-k3"),
+             ("nim", "nvidia/nemotron-3-super-120b-a12b"),
              ("nim", "nvidia/nemotron-3.5-lightning-30b-a3b"),
              ("agnes", "agnes-2.5-pro"), ("vulkan", None)],
     # short classification jobs where the local GPU's ~8 tok/s is competitive
-    "vulkan": [("vulkan", None), ("agnes", "agnes-3.0-flash")],
+    "vulkan": [("vulkan", None), ("atria", "Atria-Dawn-Preview"),
+               ("agnes", "agnes-3.0-flash")],
 }
 
 
@@ -103,7 +120,7 @@ def vulkan(messages, model, max_tokens, temperature, timeout):
     return None
 
 
-PROVIDERS = {"agnes": agnes, "nim": nim, "vulkan": vulkan}
+PROVIDERS = {"atria": atria, "agnes": agnes, "nim": nim, "vulkan": vulkan}
 
 
 def ask(messages, tier="fast", max_tokens=1600, temperature=0.4, timeout=120):
@@ -144,7 +161,7 @@ def ask_json(messages, tier="fast", max_tokens=800, timeout=120):
 def image(prompt, size="1024x1024", model="agnes-image-2.5-flash", timeout=300):
     """Generate an image; returns the URL or None."""
     import requests
-    key, _ = _keys()
+    key = _keys()[1]
     if not key:
         return None
     try:
