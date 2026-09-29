@@ -1,4 +1,16 @@
 
-=== AutoBounty cycle 1 @ 2026-09-27T17:58:07.548249 ===
-[recon] Slack: +38078 subdomains, 0 live hosts
-[recon] Atlassian: +29199 subdomains, 0 live hosts
+=== AutoBounty cycle 1 @ 2026-09-28T13:10:50.108030 ===
+[recon] GitHub: +12370 subdomains, 0 live hosts
+[recon] GitLab: +673 subdomains, 125 live hosts
+[recon] Uber: +10067 subdomains, 0 live hosts
+[recon] Shopify: +4865 subdomains, 0 live hosts
+[recon] Tesla: +1187 subdomains, 0 live hosts
+[recon] Yahoo: +37311 subdomains, 0 live hosts
+[recon] DigitalOcean: +405 subdomains, 0 live hosts
+[recon] Cloudflare: +10825 subdomains, 0 live hosts
+[recon] Coinbase: +365 subdomains, 0 live hosts
+[recon] Dropbox: +2400 subdomains, 0 live hosts
+[recon] Slack: +13526 subdomains, 0 live hosts
+[recon] Atlassian: +6735 subdomains, 0 live hosts
+[recon] Red Hat: +98092 subdomains, 0 live hosts
+[state] snapshot 1825 live hosts, 2 findings
