@@ -110,7 +110,8 @@ class DB:
             self.conn.execute(
                 "INSERT INTO hosts(program,host,source,first_seen,last_seen,in_scope) "
                 "VALUES(?,?,?,?,?,?) ON CONFLICT(program,host) DO UPDATE SET "
-                "last_seen=excluded.last_seen, source=excluded.source",
+                "last_seen=excluded.last_seen, source=excluded.source, "
+                "status=CASE WHEN hosts.status=0 THEN NULL ELSE hosts.status END",
                 (program, host, source, now, now, 1 if in_scope else 0))
             self.conn.commit()
 
@@ -122,7 +123,8 @@ class DB:
         return [dict(r) for r in self.conn.execute(q, (program,))]
 
     def live_hosts(self, program=None):
-        q = "SELECT * FROM hosts WHERE in_scope=1 AND status IS NOT NULL AND status < 500"
+        q = ("SELECT * FROM hosts WHERE in_scope=1 "
+             "AND status BETWEEN 100 AND 499")
         if program:
             q += " AND program=?"
             return [dict(r) for r in self.conn.execute(q, (program,))]
@@ -146,6 +148,15 @@ class DB:
                 "UPDATE hosts SET status=?,title=?,tech=?,ip=?,cdn=?,url=? "
                 "WHERE program=? AND host=?",
                 (status, title, tech, ip, 1 if cdn else 0, url, program, host))
+            self.conn.commit()
+
+    def mark_host_unreachable(self, program, host):
+        """Record a completed probe with no HTTP response; zero is not a live status."""
+        with self._lock:
+            self.conn.execute(
+                "UPDATE hosts SET status=0,title=NULL,tech=NULL,ip=NULL,cdn=0,url=NULL "
+                "WHERE program=? AND host=? AND status IS NULL",
+                (program, host))
             self.conn.commit()
 
     # ---- findings -------------------------------------------------------
@@ -214,7 +225,7 @@ class DB:
     def export_state(self, path):
         live = [dict(r) for r in self.conn.execute(
             "SELECT program,host,url,status,title,tech,first_seen,last_seen,"
-            "scanned_at,in_scope FROM hosts WHERE status IS NOT NULL AND status < 500")]
+            "scanned_at,in_scope FROM hosts WHERE status BETWEEN 100 AND 499")]
         findings = [dict(r) for r in self.conn.execute("SELECT * FROM findings")]
         progs = {r["name"]: {"last_recon_at": r["last_recon_at"],
                             "last_scan_at": r["last_scan_at"],
@@ -247,11 +258,13 @@ class DB:
         for h in s.get("live_hosts", []):
             self.conn.execute(
                 "INSERT OR IGNORE INTO hosts(program,host,source,first_seen,last_seen,"
-                "in_scope,status,title,tech,scanned_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "in_scope,status,title,tech,scanned_at,url) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (h["program"], h["host"], "state-import",
                  int(h["first_seen"]), int(h["last_seen"]), 1,
                  h.get("status"), h.get("title"), h.get("tech"),
-                 int(h["scanned_at"]) if h.get("scanned_at") else None))
+                 int(h["scanned_at"]) if h.get("scanned_at") else None,
+                 h.get("url")))
         for f_ in s.get("findings", []):
             self.conn.execute(
                 "INSERT OR IGNORE INTO findings(program,host,template_id,template_name,"

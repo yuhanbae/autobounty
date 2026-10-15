@@ -2,8 +2,8 @@ name: AutoBounty cycle
 
 on:
   schedule:
-    # every 20 minutes; GitHub may delay during high load. The run commits
-    # results back to the repo, which also keeps the scheduled workflow alive.
+    # every 20 minutes; GitHub may delay during high load. State is committed
+    # only as encrypted ciphertext.
     - cron: "*/20 * * * *"
   workflow_dispatch: {}
 
@@ -24,10 +24,25 @@ jobs:
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       AUTOBOUNTY_BOT_TOKEN: ${{ secrets.AUTOBOUNTY_BOT_TOKEN }}
+      AUTOBOUNTY_STATE_KEY: ${{ secrets.AUTOBOUNTY_STATE_KEY }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       RUNNER_NAME: github-actions
     steps:
       - uses: actions/checkout@v4
+
+      - name: Restore encrypted private state
+        run: |
+          if [ -z "$AUTOBOUNTY_STATE_KEY" ]; then
+            echo "Required AUTOBOUNTY_STATE_KEY secret is missing"
+            exit 1
+          fi
+          if [ -f data/state.enc ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 \
+              -pass env:AUTOBOUNTY_STATE_KEY \
+              -in data/state.enc -out "$RUNNER_TEMP/autobounty-state.tar.gz"
+            tar -xzf "$RUNNER_TEMP/autobounty-state.tar.gz" -C .
+            rm -f "$RUNNER_TEMP/autobounty-state.tar.gz"
+          fi
 
       - uses: actions/setup-go@v5
         with:
@@ -35,7 +50,19 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          { python-version: "3.12" }
+          python-version: "3.12"
+
+      - name: Cache ProjectDiscovery tools
+        uses: actions/cache@v4
+        with:
+          path: ~/go/bin
+          key: pd-tools-${{ runner.os }}-v1
+
+      - name: Cache nuclei templates
+        uses: actions/cache@v4
+        with:
+          path: ~/nuclei-templates
+          key: nuclei-templates-${{ runner.os }}-v1
 
       - name: Install Python deps
         run: pip install -q requests pyyaml
@@ -47,38 +74,52 @@ jobs:
             github.com/projectdiscovery/dnsx/cmd/dnsx@latest \
             github.com/projectdiscovery/httpx/cmd/httpx@latest \
             github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest ; do
-              go install -v "$repo" || echo "WARN install failed: $repo"
+              tool="${repo##*/}"
+              tool="${tool%@latest}"
+              if [ ! -x "$HOME/go/bin/$tool" ]; then
+                go install -v "$repo"
+              fi
           done
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
 
       - name: Fetch nuclei templates
         run: |
-          if [ ! -d nuclei-templates/.git ]; then
-            git clone --depth 1 --filter=blob:none --sparse https://github.com/projectdiscovery/nuclei-templates.git
-            cd nuclei-templates
+          if [ ! -d "$HOME/nuclei-templates/.git" ]; then
+            git clone --depth 1 --filter=blob:none --sparse https://github.com/projectdiscovery/nuclei-templates.git "$HOME/nuclei-templates"
+            cd "$HOME/nuclei-templates"
             git sparse-checkout set http dns ssl network cves vulnerabilities exposures misconfiguration
+          else
+            git -C "$HOME/nuclei-templates" pull --ff-only
           fi
 
       - name: Run one pipeline cycle
         run: |
           mkdir -p data reports logs
-          python3 autopilot.py --once 2>&1 | tee logs/cycle.log
+          if ! python3 autopilot.py --once > logs/cycle.log 2>&1; then
+            echo "Pipeline failed; findings and detailed logs are not printed to this public run"
+            exit 1
+          fi
 
       - name: Run idle sub-agents on any queued LLM jobs
         run: |
           for i in 1 2; do
-            timeout 500 python3 subagent.py "actions-$i" triage draft verify research 2>&1 \
-              | tee -a logs/subagent-$i.log || true
+            timeout 300 python3 subagent.py "actions-$i" triage draft verify research \
+              > logs/subagent-$i.log 2>&1 || true
           done
 
-      - name: Commit state + findings back to the repo
+      - name: Encrypt private state and commit ciphertext
         run: |
+          tar -czf "$RUNNER_TEMP/autobounty-state.tar.gz" data/state.json reports
+          openssl enc -aes-256-cbc -pbkdf2 -salt \
+            -pass env:AUTOBOUNTY_STATE_KEY \
+            -in "$RUNNER_TEMP/autobounty-state.tar.gz" -out data/state.enc
+          rm -f "$RUNNER_TEMP/autobounty-state.tar.gz"
           git config user.name  "autobounty-bot"
           git config user.email "autobounty-bot@users.noreply.github.com"
-          git add data reports logs INDEX.md 2>/dev/null || true
+          git add data/state.enc
           if git diff --cached --quiet; then
             echo "no changes this cycle"
           else
-            git commit -m "cycle: $(date -u +%Y-%m-%dT%H:%MZ) — $(git diff --cached --name-only | wc -l) files"
+            git commit -m "cycle: encrypted private state $(date -u +%Y-%m-%dT%H:%MZ)"
             git push
           fi

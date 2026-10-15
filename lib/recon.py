@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Recon: scope seeding -> passive subdomain enumeration -> resolution -> HTTP probing.
 Every discovered host is scope-checked before it is stored or probed."""
-import json, os, shutil, subprocess, sys, time
+import json, os, shutil, subprocess, sys, threading, time
 sys.path.insert(0, os.path.dirname(__file__))
 from scope import in_scope, split_host
 
@@ -83,8 +83,18 @@ def _probe_chunk(httpx, cfg, hosts, timeout):
         print("[probe] spawn failed:", e, flush=True)
         return []
     recs = []
-    deadline = time.time() + timeout
-    killed = False
+    timed_out = threading.Event()
+
+    def kill_on_timeout():
+        timed_out.set()
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    watchdog = threading.Timer(timeout, kill_on_timeout)
+    watchdog.daemon = True
+    watchdog.start()
     try:
         proc.stdin.write("\n".join(hosts) + "\n")
         proc.stdin.close()
@@ -96,17 +106,16 @@ def _probe_chunk(httpx, cfg, hosts, timeout):
                 recs.append(json.loads(line))
             except Exception:
                 pass
-            if not killed and time.time() > deadline:
-                killed = True
-                proc.kill()                      # stop the crawl, keep what we have
-    except Exception:
+    except (BrokenPipeError, OSError):
         pass
     finally:
+        watchdog.cancel()
         try:
-            proc.kill()
+            proc.wait(timeout=1)
         except Exception:
-            pass
-    return recs
+            proc.kill()
+            proc.wait()
+    return recs, not timed_out.is_set() and proc.returncode == 0
 
 
 def _resolve_chunk(dnsx, cfg, hosts, timeout):
@@ -127,7 +136,10 @@ def resolve_and_probe(db, program, cfg, max_hosts):
     for 2 days: one timeout = all output discarded = probed=0 forever)."""
     scope = json.loads(program["scope"])
     excl = json.loads(program["exclusions"])
-    hosts = [h["host"] for h in db.all_hosts(program["name"])][:max_hosts]
+    hosts = [r["host"] for r in db.conn.execute(
+        "SELECT host FROM hosts WHERE program=? AND in_scope=1 AND status IS NULL "
+        "ORDER BY first_seen DESC LIMIT ?",
+        (program["name"], int(max_hosts)))]
     hosts = [h for h in hosts if in_scope(h, scope, excl)]
     if not hosts:
         return 0
@@ -144,11 +156,14 @@ def resolve_and_probe(db, program, cfg, max_hosts):
     for i, chunk in enumerate(_chunks(hosts, chunk_n)):
         # dnsx is a HINT only: on timeout we probe the raw chunk (httpx resolves).
         alive = _resolve_chunk(dnsx, cfg, chunk, timeout=120)
-        targets = sorted({h for h in chunk if alive is None or h in alive} or chunk)
+        targets = sorted(chunk if alive is None else {h for h in chunk if h in alive})
         if not targets:
+            if alive is not None:
+                for host in chunk:
+                    db.mark_host_unreachable(program["name"], host)
             continue
         timeout = max(120, int(len(targets) * per_host_budget) + 60)
-        recs = _probe_chunk(httpx, cfg, targets, timeout)
+        recs, completed = _probe_chunk(httpx, cfg, targets, timeout)
         for j in recs:
             host = split_host(j.get("url", ""))
             if not host or not in_scope(host, scope, excl):
@@ -161,6 +176,11 @@ def resolve_and_probe(db, program, cfg, max_hosts):
                              bool(j.get("cdn")),
                              url=(j.get("url") or "")[:300])
             probed_hosts.add(host)
+        reachable = {split_host(j.get("url", "")) for j in recs}
+        if completed:
+            for host in targets:
+                if host not in reachable:
+                    db.mark_host_unreachable(program["name"], host)
         print(f"[probe] {program['name']}: chunk {i + 1} "
               f"({len(targets)} targets -> {len(probed_hosts)} live so far)", flush=True)
     return len(probed_hosts)

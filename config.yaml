@@ -24,7 +24,9 @@ recon:
                    "-ip", "-timeout", "6", "-no-color"]
   httpx_threads:  10          # network I/O concurrency (CPU stays capped at 3)
   httpx_rps:      40
-  max_hosts_per_program: 400
+  max_hosts_per_program: 100
+  probe_chunk:    100
+  programs_per_cycle: 1
   recon_every_hours: 12        # re-enumerate a program at most this often
 
 scan:
@@ -37,7 +39,8 @@ scan:
   severity:       ["medium", "high", "critical"]
   nuclei_rps:     80            # network-bound; CPU cap of 3 is respected
   nuclei_concurrency: 20
-  scan_batch:     15           # hosts per nuclei invocation (progress accumulates)
+  scan_batch:     1            # hosts per nuclei invocation (progress accumulates)
+  programs_per_cycle: 1
   timeout_seconds: 1500
   # findings that are almost always noise on public programs
   drop_templates:

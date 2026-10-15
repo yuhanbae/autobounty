@@ -214,13 +214,18 @@ class AutoBounty:
             return 0
         programs = self.db.programs()
         every_h = self.cfg["recon"].get("recon_every_hours", 12)
+        now = time.time()
+        programs = [p for p in programs
+                    if not p.get("last_recon_at")
+                    or now - p["last_recon_at"] >= every_h * 3600]
+        programs.sort(key=lambda p: (p.get("last_recon_at") or 0, p["name"]))
+        programs = programs[:max(1, int(
+            self.cfg["recon"].get("programs_per_cycle", 1)))]
         total_hosts = 0
         for p in programs:
             if self.paused.is_set():
                 return total_hosts
             # re-enumerate a program at most once per recon_every_hours
-            if p.get("last_recon_at") and (time.time() - p["last_recon_at"]) < every_h * 3600:
-                continue
             t0 = time.time()
             n_seed = recon.seed_hosts(self.db, p)
             n_sub = recon.enumerate_subdomains(self.db, p, self.cfg)
@@ -242,25 +247,18 @@ class AutoBounty:
         accumulates across cycles even on this low-power box."""
         programs = self.db.programs()
         new_all = []
-        batch = self.cfg["scan"].get("scan_batch", 25)
+        batch = max(1, int(self.cfg["scan"].get("scan_batch", 1)))
+        program_limit = max(1, int(
+            self.cfg["scan"].get("programs_per_cycle", 1)))
+        programs.sort(key=lambda p: (p.get("last_scan_at") or 0, p["name"]))
+        scanned_programs = 0
         for p in programs:
             if self.paused.is_set():
                 return new_all
-            # backfill-probe a BOUNDED slice of unprobed hosts. The old code fed
-            # the entire unprobed list (350k+ hosts) to one dnsx+httpx pair, which
-            # always timed out and discarded everything -> scans never happened.
-            max_backfill = int(self.cfg["recon"].get("max_hosts_per_program", 400))
-            n_unprobed = self.db.conn.execute(
-                "SELECT COUNT(*) c FROM hosts WHERE program=? AND in_scope=1 "
-                "AND status IS NULL", (p["name"],)).fetchone()["c"]
-            if n_unprobed:
-                print(f"[scan] {p['name']}: backfill-probing {min(n_unprobed, max_backfill)} "
-                      f"of {n_unprobed} unprobed hosts", flush=True)
-                recon.resolve_and_probe(self.db, p, self.cfg, max_backfill)
-            # pick the oldest-scanned live hosts (NULL scanned_at sorts first)
             rows = self.db.conn.execute(
                 "SELECT * FROM hosts WHERE program=? AND in_scope=1 AND status IS NOT NULL "
-                "AND status < 500 ORDER BY scanned_at IS NULL DESC, scanned_at ASC "
+                "AND status BETWEEN 100 AND 499 "
+                "ORDER BY scanned_at IS NULL DESC, scanned_at ASC "
                 f"LIMIT {int(batch)}", (p["name"],)).fetchall()
             hosts = [r["host"] for r in rows]
             if not hosts:
@@ -274,6 +272,9 @@ class AutoBounty:
                             f"({time.time()-t0:.0f}s)", started_at=int(t0))
             new_all += new
             time.sleep(3)
+            scanned_programs += 1
+            if scanned_programs >= program_limit:
+                break
         return new_all
 
     def phase_triage(self, new_findings):

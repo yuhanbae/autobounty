@@ -111,6 +111,7 @@ docker compose logs -f
 | `TELEGRAM_CHAT_ID` | Auto-captured | Owner notifications |
 | `RAILWAY_TOKEN` / `FLY_API_TOKEN` | Platform dashboards | Deployment |
 | `GITHUB_TOKEN` | GitHub Settings | Actions secrets, git push |
+| `AUTOBOUNTY_STATE_KEY` | Strong random value | Encrypts the GitHub Actions state/report archive |
 
 ---
 
@@ -161,7 +162,7 @@ print('Findings:', d.conn.execute('select count(*) from findings').fetchone()[0]
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
 │  GitHub Actions │────▶│   GitHub Repo    │◀───│  Railway / Fly  │
-│  (scheduled)    │     │  (state.json)    │    │  (persistent)   │
+│  (scheduled)    │     │  (state.enc)     │    │  (persistent)   │
 └─────────────────┘     └────────┬─────────┘    └─────────────────┘
                                  │
                     ┌────────────┴────────────┐
@@ -198,7 +199,10 @@ print('Findings:', d.conn.execute('select count(*) from findings').fetchone()[0]
 
 - `.env` is in `.gitignore` — never committed
 - GitHub Actions secrets store keys securely
-- `data/autobounty.db` is gitignored; only `state.json` committed
+- The GitHub Actions workflow requires `AUTOBOUNTY_STATE_KEY` and commits only
+  encrypted `data/state.enc`; plaintext state, reports, and logs are not
+  committed by the workflow.
+- Back up the encryption key securely. Without it the saved state is unrecoverable.
 - All external calls use TLS
 
 ---
