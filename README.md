@@ -81,7 +81,8 @@ triaged findings. Reports land in `reports/` as they are produced.
 
 The scheduled workflow processes one due program's recon and one live host's
 scan per cycle to keep runs below the Actions timeout. It caches ProjectDiscovery
-tools and the Nuclei template checkout. Configure `AUTOBOUNTY_STATE_KEY` as a
+tools and the Nuclei template checkout; passive enumeration is time-bounded per
+apex so one slow source cannot monopolize a run. Configure `AUTOBOUNTY_STATE_KEY` as a
 GitHub Actions secret before enabling the workflow; the workflow encrypts the
 state and report archive and commits only `data/state.enc`. Findings and scanner
 logs are not printed to public workflow logs. Keep the key private and back it

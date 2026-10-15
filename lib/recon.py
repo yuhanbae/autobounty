@@ -49,10 +49,14 @@ def enumerate_subdomains(db, program, cfg):
     sf = tool("subfinder")
     if not sf:
         return 0
+    max_minutes = max(1, int(
+        cfg["recon"].get("subfinder_max_time_minutes", 4)))
     args = list(cfg["recon"].get("subfinder_args", []))
+    args += ["-max-time", str(max_minutes)]
     found = 0
     for a in apex:
-        out, rc = run([sf] + args + ["-d", a, "-o", "-"], timeout=1500)
+        out, rc = run([sf] + args + ["-d", a, "-o", "-"],
+                      timeout=max_minutes * 60 + 30)
         if rc == 124:
             continue
         for line in out.splitlines():

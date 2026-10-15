@@ -25,6 +25,10 @@ class _FakeDB:
         self.conn = _Rows(hosts)
         self.unreachable = []
         self.metadata = []
+        self.seeded = []
+
+    def upsert_host(self, program, host, source):
+        self.seeded.append((program, host, source))
 
     def mark_host_unreachable(self, program, host):
         self.unreachable.append((program, host))
@@ -49,6 +53,36 @@ class _FakePipelineDB:
 
 
 class ReconProgressTests(unittest.TestCase):
+    def test_passive_enumeration_has_a_per_apex_time_limit(self):
+        db = _FakeDB([])
+        program = {
+            "name": "Example",
+            "scope": '["*.example.com", "*.example.net"]',
+            "exclusions": "[]",
+        }
+        calls = []
+
+        def fake_run(cmd, timeout):
+            calls.append((cmd, timeout))
+            return "www.example.com\n", 0
+
+        with patch.object(recon, "tool", return_value="subfinder"), \
+                patch.object(recon, "run", side_effect=fake_run):
+            count = recon.enumerate_subdomains(
+                db, program,
+                {"recon": {
+                    "subfinder_args": ["-silent", "-all"],
+                    "subfinder_max_time_minutes": 2,
+                }},
+            )
+
+        self.assertEqual(count, 2)
+        self.assertEqual(len(calls), 2)
+        for cmd, timeout in calls:
+            self.assertIn("-max-time", cmd)
+            self.assertEqual(cmd[cmd.index("-max-time") + 1], "2")
+            self.assertEqual(timeout, 150)
+
     def test_empty_dns_result_is_skipped_and_incomplete_probe_is_retryable(self):
         db = _FakeDB(["a.example.com", "b.example.com", "c.example.com"])
         program = {

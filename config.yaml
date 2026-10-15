@@ -19,6 +19,7 @@ recon:
   # subfinder passive sources only (no API keys configured)
   # v2.16 is passive-by-default (the -passive flag was removed)
   subfinder_args: ["-silent", "-all"]
+  subfinder_max_time_minutes: 4
   dnsx_args:      ["-silent", "-a"]
   httpx_args:     ["-silent", "-status-code", "-title", "-tech-detect", "-cdn",
                    "-ip", "-timeout", "6", "-no-color"]
