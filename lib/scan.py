@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Scanning: nuclei (non-destructive template set) over live in-scope hosts.
 Results are STREAMED and persisted as they arrive, so a timeout never loses work."""
-import json, os, subprocess, sys, time
+import json, os, subprocess, sys, threading, time
 sys.path.insert(0, os.path.dirname(__file__))
 from recon import tool
 from scope import in_scope
@@ -62,11 +62,23 @@ def scan_hosts(db, program, cfg, hosts, tag="nuclei"):
     excl = json.loads(program["exclusions"])
     drop = sc.get("drop_templates", [])
     new_ids = []
-    deadline = time.time() + sc["timeout_seconds"]
+    timeout = max(0.01, float(sc["timeout_seconds"]))
 
     try:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL, text=True)
+        timed_out = threading.Event()
+
+        def kill_on_timeout():
+            timed_out.set()
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+        watchdog = threading.Timer(timeout, kill_on_timeout)
+        watchdog.daemon = True
+        watchdog.start()
         proc.stdin.write("\n".join(targets) + "\n")
         proc.stdin.close()
         for line in proc.stdout:                    # STREAM: persist each finding live
@@ -80,12 +92,19 @@ def scan_hosts(db, program, cfg, hosts, tag="nuclei"):
             fid, sev = _handle_line(db, program, j, scope, excl, drop)
             if fid:
                 new_ids.append((fid, sev))
-        proc.wait(timeout=max(30, deadline - time.time()))
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        print("[scan] nuclei killed at timeout (partial results kept)", flush=True)
+        proc.wait()
+        if timed_out.is_set():
+            print("[scan] nuclei killed at timeout (partial results kept)", flush=True)
     except Exception as e:
         print("[scan] error:", e, flush=True)
+    finally:
+        if "watchdog" in locals():
+            watchdog.cancel()
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
     return new_ids
 
 

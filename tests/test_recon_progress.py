@@ -1,6 +1,7 @@
 import os
 import sys
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ sys.path.insert(0, os.path.join(ROOT, "lib"))
 
 import recon
 import autopilot
+import scan
 from db import DB
 
 
@@ -52,6 +54,42 @@ class _FakePipelineDB:
         pass
 
 
+class _BlockingStdout:
+    def __init__(self, process):
+        self.process = process
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.process.killed.wait(0.5):
+            raise StopIteration
+        raise StopIteration
+
+
+class _BlockingProcess:
+    def __init__(self):
+        self.killed = threading.Event()
+        self.returncode = None
+        self.stdin = self
+        self.stdout = _BlockingStdout(self)
+
+    def write(self, _):
+        pass
+
+    def close(self):
+        pass
+
+    def kill(self):
+        self.returncode = -9
+        self.killed.set()
+
+    def wait(self, timeout=None):
+        if not self.killed.is_set():
+            self.killed.wait(timeout)
+        return self.returncode or 0
+
+
 class ReconProgressTests(unittest.TestCase):
     def test_passive_enumeration_has_a_per_apex_time_limit(self):
         db = _FakeDB([])
@@ -82,6 +120,36 @@ class ReconProgressTests(unittest.TestCase):
             self.assertIn("-max-time", cmd)
             self.assertEqual(cmd[cmd.index("-max-time") + 1], "2")
             self.assertEqual(timeout, 150)
+
+    def test_nuclei_timeout_kills_a_process_blocked_without_output(self):
+        process = _BlockingProcess()
+        db = _FakeDB([])
+        program = {
+            "name": "Example",
+            "scope": '["*.example.com"]',
+            "exclusions": "[]",
+        }
+        config = {
+            "scan": {
+                "tags": ["cve"],
+                "exclude_tags": ["intrusive"],
+                "severity": ["medium", "high", "critical"],
+                "nuclei_rps": 1,
+                "nuclei_concurrency": 1,
+                "timeout_seconds": 0.05,
+            }
+        }
+
+        with patch.object(scan, "TPL_DIR", self._temp_dir.name), \
+                patch.object(scan, "tool", return_value="nuclei"), \
+                patch.object(scan.subprocess, "Popen", return_value=process):
+            started = time.monotonic()
+            findings = scan.scan_hosts(db, program, config, ["a.example.com"])
+            duration = time.monotonic() - started
+
+        self.assertEqual(findings, [])
+        self.assertTrue(process.killed.is_set())
+        self.assertLess(duration, 0.4)
 
     def test_empty_dns_result_is_skipped_and_incomplete_probe_is_retryable(self):
         db = _FakeDB(["a.example.com", "b.example.com", "c.example.com"])
