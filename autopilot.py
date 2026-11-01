@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib
 
 from db import DB
 import scope as scopelib
-import recon, scan, triage, report, notify
+import recon, scan, triage, report, notify, money, submission
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 CFG_PATH = os.path.join(BASE, "config.yaml")
@@ -159,6 +159,38 @@ class AutoBounty:
             for r in recent:
                 msg.append(f"  • ${r['amount_usd']:.2f} — {r['note'] or r['source']}")
             notify.send("\n".join(msg) or "No payouts logged yet.", cid)
+        elif cmd == "submit":
+            item = submission.list_queue(self.db, "queued", 1)
+            if not item:
+                notify.send("Queue empty.", cid)
+            else:
+                s = item[0]
+                notify.send(
+                    f"NEXT SUBMIT #{s['id']} (${s['ev_usd']:.0f} EV) {s['title']}\n"
+                    f"Platform: {s['platform']}\nPaste-ready: {s['package_path']}\n"
+                    f"After you submit: /mark {s['id']} submitted <ref>", cid)
+        elif cmd == "queue":
+            q = submission.list_queue(self.db, "queued", 20)
+            if not q:
+                notify.send("Queue empty.", cid)
+            else:
+                lines = [f"#{s['id']} ${s['ev_usd']:.0f} {s['severity'].upper()} {s['program']} - {s['title']}" for s in q]
+                notify.send("QUEUE (EV-ranked):\n" + "\n".join(lines), cid)
+        elif cmd == "mark":
+            if len(argv) >= 3:
+                try:
+                    sid = int(argv[1]); st = argv[2]
+                    amt = float(argv[3]) if len(argv) >= 4 and argv[3] else None
+                    note = " ".join(argv[4:])
+                    submission.mark_submission(self.db, sid, st, None, amt, note)
+                    if st == "paid" and amt:
+                        notify.send(f"Logged ${amt:,.2f} payout on #{sid}.", cid)
+                    else:
+                        notify.send(f"#{sid} -> {st}.", cid)
+                except Exception as e:
+                    notify.send(f"mark failed: {e}", cid)
+            else:
+                notify.send("usage: /mark <id> <submitted|accepted|paid> [amount] [note]", cid)
         elif cmd == "pause":
             self.paused.set()
             notify.send("⏸ Work loop paused. Use /resume to continue.", cid)
@@ -169,8 +201,8 @@ class AutoBounty:
             self.force_scan.set()
             notify.send("⏩ Scan cycle queued.", cid)
         else:
-            notify.send("Commands: /status /stats /findings /revenue "
-                        "/pause /resume /scan", cid)
+            notify.send("Commands: /status /stats /findings /revenue /queue "
+                        "/submit /mark /pause /resume /scan", cid)
 
     # ------------------------------------------------- periodic progress
     def progress_report(self):
@@ -302,6 +334,11 @@ class AutoBounty:
                         "UPDATE findings SET alert_sent=1 WHERE id=?", (fid,))
                     self.db.conn.commit()
         report.write_index(self.db, self.cfg)
+        # money orientation: package reported findings into the EV-ranked submission queue
+        try:
+            submission.queue_new_reports(self.db, self.cfg)
+        except Exception as e:
+            print("[submission] queue error:", e, flush=True)
         return q
 
     # -------------------------------------------------------------- loop
