@@ -159,3 +159,24 @@ programs:
     scope: ["*.redhat.com"]
     exclusions: []
     rps: 10
+
+# --- MONEY / SUBMISSION ------------------------------------------------
+# Per-program payout-tier weight (expected value = median bounty * tier * confidence).
+# Tune these to bias human attention (and auto-submit) toward programs that actually pay.
+submit:
+  autosubmit: false        # DEFAULT OFF. Bugcrowd/Intigriti adapters only; HackerOne is never auto-submitted (no public hunter API).
+  dry_run: true            # even when autosubmit=true, do a dry run unless disabled
+  tier_usd:
+    Tesla: 1.5
+    Coinbase: 1.4
+    Shopify: 1.3
+    GitHub: 1.2
+    Uber: 1.2
+    GitLab: 1.2
+    Cloudflare: 1.2
+    Atlassian: 1.1
+    Slack: 1.0
+    Yahoo: 1.0
+    Dropbox: 1.0
+    DigitalOcean: 0.9
+    Red Hat: 1.0
