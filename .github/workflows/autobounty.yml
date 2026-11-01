@@ -89,7 +89,13 @@ jobs:
             cd "$HOME/nuclei-templates"
             git sparse-checkout set http dns ssl network cves vulnerabilities exposures misconfiguration
           else
-            git -C "$HOME/nuclei-templates" pull --ff-only
+            # Cached templates are dirty (nuclei normalizes templates + writes
+            # .new-additions / TEMPLATES-STATS.* each run) -> a merge pull aborts.
+            # Force the working tree to match upstream HEAD instead of merging.
+            git -C "$HOME/nuclei-templates" fetch --depth 1 origin
+            git -C "$HOME/nuclei-templates" reset --hard FETCH_HEAD
+            git -C "$HOME/nuclei-templates" clean -fdx
+            git -C "$HOME/nuclei-templates" sparse-checkout set http dns ssl network cves vulnerabilities exposures misconfiguration
           fi
 
       - name: Run one pipeline cycle
