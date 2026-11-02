@@ -9,6 +9,7 @@ Owner control via Telegram (the bot token already on this box):
   /resume   resume             /scan    force a scan cycle now
 """
 import json, os, sys, time, threading, datetime
+import signal
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 
@@ -162,21 +163,24 @@ class AutoBounty:
         elif cmd == "submit":
             item = submission.list_queue(self.db, "queued", 1)
             if not item:
-                notify.send("Queue empty.", cid)
+                notify.send("\u2705 Queue empty \u2014 nothing new to submit.", cid)
             else:
                 s = item[0]
                 notify.send(
-                    f"NEXT SUBMIT #{s['id']} (${s['ev_usd']:.0f} EV) {s['title']}\n"
-                    f"Platform: {s['platform']}\nPaste-ready: {s['package_path']}\n"
-                    f"After you submit: /mark {s['id']} submitted <ref>", cid)
+                    f"\U0001F4E4 *Next submission* (#{s['id']}) \u2014 ${s['ev_usd']:.0f} EV\n"
+                    f"*{s['title']}*\nPlatform: {s['platform']}\n"
+                    f"Paste-ready: {s['package_path']}\n"
+                    f"After submitting: /mark {s['id']} submitted <ref>", cid)
         elif cmd == "queue":
             q = submission.list_queue(self.db, "queued", 20)
             if not q:
                 notify.send("Queue empty.", cid)
             else:
-                lines = [f"#{s['id']} ${s['ev_usd']:.0f} {s['severity'].upper()} {s['program']} - {s['title']}" for s in q]
-                notify.send("QUEUE (EV-ranked):\n" + "\n".join(lines), cid)
+                lines = [f"#{s['id']} ${s['ev_usd']:.0f} {s['severity'].upper()} "
+                         f"{s['program']} \u2014 {s['title']}" for s in q]
+                notify.send("\U0001F4E4 *Submission queue (EV-ranked):*\n" + "\n".join(lines), cid)
         elif cmd == "mark":
+            # /mark <id> <submitted|triaged|accepted|paid|duplicate> [amount] [note]
             if len(argv) >= 3:
                 try:
                     sid = int(argv[1]); st = argv[2]
@@ -184,9 +188,9 @@ class AutoBounty:
                     note = " ".join(argv[4:])
                     submission.mark_submission(self.db, sid, st, None, amt, note)
                     if st == "paid" and amt:
-                        notify.send(f"Logged ${amt:,.2f} payout on #{sid}.", cid)
+                        notify.send(f"\U0001F4B0 Logged ${amt:,.2f} payout on #{sid}.", cid)
                     else:
-                        notify.send(f"#{sid} -> {st}.", cid)
+                        notify.send(f"\u2705 #{sid} -> {st}.", cid)
                 except Exception as e:
                     notify.send(f"mark failed: {e}", cid)
             else:
@@ -240,24 +244,30 @@ class AutoBounty:
         return total
 
     # -------------------------------------------------------------- phases
+    def unscanned_live(self):
+        """Live hosts we have never nuclei-scanned. When this is large, scanning
+        is strictly more valuable than more recon (recon already found them)."""
+        try:
+            r = self.db.conn.execute(
+                "SELECT COUNT(*) c FROM hosts WHERE in_scope=1 AND status IS NOT NULL "
+                "AND status < 500 AND scanned_at IS NULL").fetchone()
+            return r["c"] if r else 0
+        except Exception:
+            return 0
+
     def phase_recon(self):
         if getattr(self, "skip_recon", False):
             print("[recon] skipped (--no-recon)", flush=True)
             return 0
         programs = self.db.programs()
         every_h = self.cfg["recon"].get("recon_every_hours", 12)
-        now = time.time()
-        programs = [p for p in programs
-                    if not p.get("last_recon_at")
-                    or now - p["last_recon_at"] >= every_h * 3600]
-        programs.sort(key=lambda p: (p.get("last_recon_at") or 0, p["name"]))
-        programs = programs[:max(1, int(
-            self.cfg["recon"].get("programs_per_cycle", 1)))]
         total_hosts = 0
         for p in programs:
             if self.paused.is_set():
                 return total_hosts
             # re-enumerate a program at most once per recon_every_hours
+            if p.get("last_recon_at") and (time.time() - p["last_recon_at"]) < every_h * 3600:
+                continue
             t0 = time.time()
             n_seed = recon.seed_hosts(self.db, p)
             n_sub = recon.enumerate_subdomains(self.db, p, self.cfg)
@@ -275,70 +285,163 @@ class AutoBounty:
         return total_hosts
 
     def phase_scan(self):
-        """Scan the least-recently-scanned live hosts in bounded batches so coverage
-        accumulates across cycles even on this low-power box."""
+        """Two-pass scan over live hosts, bounded so coverage accumulates across
+        cycles even on this low-power box.
+
+        PASS 1 (fast, wide): the high-signal tags only — exposed panels, default
+        credentials, unauth endpoints, misconfig, disclosure. ~2.6k templates vs
+        6.5k, so each host gets near-complete coverage inside the same politeness
+        budget, and these tags are where public-program bounties actually live.
+        PASS 2 (deep): the full set incl. cve/vuln, on hosts already through pass 1,
+        in a smaller batch so a 25 min budget still buys real coverage."""
+        self.db.ensure_deep_scan_column()
         programs = self.db.programs()
         new_all = []
-        batch = max(1, int(self.cfg["scan"].get("scan_batch", 1)))
-        program_limit = max(1, int(
-            self.cfg["scan"].get("programs_per_cycle", 1)))
-        programs.sort(key=lambda p: (p.get("last_scan_at") or 0, p["name"]))
-        scanned_programs = 0
+        batch = self.cfg["scan"].get("scan_batch", 25)
+        deep_batch = self.cfg["scan"].get("deep_scan_batch", 6)
+        fast_tags = self.cfg["scan"].get("fast_tags")
+        # probing MORE candidate hosts only matters when we are short of live ones;
+        # otherwise it burns 1-2h per cycle re-probing while scans starve.
+        short_of_live = self.unscanned_live() < int(
+            self.cfg["scan"].get("defer_recon_above_unscanned", 150))
+        max_backfill = int(self.cfg["recon"].get("backfill_per_cycle", 60))
         for p in programs:
             if self.paused.is_set():
                 return new_all
+            if short_of_live:
+                # backfill-probe a BOUNDED slice of unprobed hosts.
+                n_unprobed = self.db.conn.execute(
+                    "SELECT COUNT(*) c FROM hosts WHERE program=? AND in_scope=1 "
+                    "AND status IS NULL", (p["name"],)).fetchone()["c"]
+                if n_unprobed:
+                    print(f"[scan] {p['name']}: backfill-probing {min(n_unprobed, max_backfill)} "
+                          f"of {n_unprobed} unprobed hosts", flush=True)
+                    recon.resolve_and_probe(self.db, p, self.cfg, max_backfill)
+            # pick the oldest-scanned live hosts (NULL scanned_at sorts first)
             rows = self.db.conn.execute(
                 "SELECT * FROM hosts WHERE program=? AND in_scope=1 AND status IS NOT NULL "
-                "AND status BETWEEN 100 AND 499 "
-                "ORDER BY scanned_at IS NULL DESC, scanned_at ASC "
+                "AND status < 500 ORDER BY scanned_at IS NULL DESC, scanned_at ASC "
                 f"LIMIT {int(batch)}", (p["name"],)).fetchall()
             hosts = [r["host"] for r in rows]
             if not hosts:
+                time.sleep(3)
                 continue
             t0 = time.time()
-            new = scan.scan_hosts(self.db, p, self.cfg, hosts)
-            self.db.mark_hosts_scanned(p["name"], hosts)
+            new, completed = scan.scan_hosts(self.db, p, self.cfg, hosts, tags=fast_tags)
+            # Only record coverage for a pass that ran to completion. A killed
+            # pass found nothing because it ran out of time, not because the
+            # hosts are clean — leaving scanned_at NULL retries them next cycle.
+            if completed:
+                self.db.mark_hosts_scanned(p["name"], hosts)
+            else:
+                print(f"[scan] {p['name']}: pass1 timed out on {len(hosts)} hosts; "
+                      f"left unmarked for retry", flush=True)
             self.db.touch_program(p["name"], "last_scan_at")
             self.db.log_run("scan", "ok",
-                            f"{p['name']}: {len(hosts)} hosts, {len(new)} new findings "
+                            f"{p['name']}: pass1 {len(hosts)} hosts, {len(new)} new findings "
                             f"({time.time()-t0:.0f}s)", started_at=int(t0))
             new_all += new
-            time.sleep(3)
-            scanned_programs += 1
-            if scanned_programs >= program_limit:
-                break
+            for fid, sev in new:            # triage now, not after all 13 programs
+                try:
+                    self.enqueue_finding(fid)
+                except Exception:
+                    pass
+            # PASS 2 (deep): full template set on hosts that finished pass 1.
+            # A never-deep-scanned live host is worth more than re-running pass 1
+            # on another slice, so spend part of this cycle here too.
+            drows = self.db.conn.execute(
+                "SELECT * FROM hosts WHERE program=? AND in_scope=1 AND status IS NOT NULL "
+                "AND status < 500 AND scanned_at IS NOT NULL AND deep_scanned_at IS NULL "
+                f"ORDER BY scanned_at ASC LIMIT {int(deep_batch)}", (p["name"],)).fetchall()
+            dhosts = [r["host"] for r in drows]
+            if dhosts:
+                t0 = time.time()
+                dnew, dcompleted = scan.scan_hosts(self.db, p, self.cfg, dhosts)
+                if dcompleted:
+                    self.db.mark_hosts_deep_scanned(p["name"], dhosts)
+                else:
+                    print(f"[scan] {p['name']}: pass2 deep timed out on "
+                          f"{len(dhosts)} hosts; left unmarked for retry", flush=True)
+                self.db.log_run("scan", "ok" if dcompleted else "partial",
+                                f"{p['name']}: pass2 deep {len(dhosts)} hosts, "
+                                f"{len(dnew)} new findings ({time.time()-t0:.0f}s)",
+                                started_at=int(t0))
+                new_all += dnew
+                for fid, sev in dnew:
+                    try:
+                        self.enqueue_finding(fid)
+                    except Exception:
+                        pass
+                time.sleep(3)
         return new_all
 
-    def phase_triage(self, new_findings):
-        """Enqueue LLM work for the sub-agents; never block the scan loop."""
+    def enqueue_finding(self, fid):
+        """Rule-triage one finding, then queue LLM work + owner alert immediately.
+        Called per-program as findings land so a real vuln reaches the
+        sub-agents within minutes instead of waiting for the whole scan phase."""
         import jobs
         min_alert = _SEV_RANK.get(self.cfg["notify"]["alert_min_severity"], 3)
+        f = self.db.finding(fid)
+        if not f:
+            return 0
+        status, note = triage.rule_triage(f)
+        if status == "noise":
+            self.db.set_finding_status(fid, "noise")
+            return 0
         q = 0
+        _, added = jobs.enqueue(self.db, "triage", {"finding_id": fid})
+        q += added
+        _, added = jobs.enqueue(self.db, "draft", {"finding_id": fid})
+        q += added
+        if _SEV_RANK.get(f["severity"], 0) >= 2:
+            _, added = jobs.enqueue(self.db, "verify", {"finding_id": fid})
+            q += added
+        # instant owner alert for high+ (report follows from the sub-agent)
+        if _SEV_RANK.get(f["severity"], 0) >= min_alert or triage.sensitive_boost(f):
+            if notify.alert_finding(f, "(report drafting in progress)"):
+                self.db.conn.execute(
+                    "UPDATE findings SET alert_sent=1 WHERE id=?", (fid,))
+                self.db.conn.commit()
+        return q
+
+    def phase_triage(self, new_findings):
+        """Enqueue LLM work for the sub-agents; never block the scan loop.
+        Findings are enqueued per-program in phase_scan; this is the final
+        safety net for anything the per-program path missed, plus the report
+        index rebuild."""
+        q = 0
+        done = set()
+        import jobs
+        for j in self.db.conn.execute(
+                "SELECT payload FROM jobs WHERE kind IN ('triage','draft','verify')"):
+            try:
+                done.add(json.loads(j["payload"]).get("finding_id"))
+            except Exception:
+                pass
         for fid, sev in new_findings:
-            f = self.db.finding(fid)
-            status, note = triage.rule_triage(f)
-            if status == "noise":
-                self.db.set_finding_status(fid, "noise")
+            if fid in done:
                 continue
-            _, added = jobs.enqueue(self.db, "triage", {"finding_id": fid})
-            q += added
-            _, added = jobs.enqueue(self.db, "draft", {"finding_id": fid})
-            q += added
-            if _SEV_RANK.get(f["severity"], 0) >= 2:
-                _, added = jobs.enqueue(self.db, "verify", {"finding_id": fid})
-                q += added
-            # instant owner alert for high+ (report follows from the sub-agent)
-            if _SEV_RANK.get(f["severity"], 0) >= min_alert or triage.sensitive_boost(f):
-                if notify.alert_finding(f, "(report drafting in progress)"):
-                    self.db.conn.execute(
-                        "UPDATE findings SET alert_sent=1 WHERE id=?", (fid,))
-                    self.db.conn.commit()
+            q += self.enqueue_finding(fid)
         report.write_index(self.db, self.cfg)
         # money orientation: package reported findings into the EV-ranked submission queue
         try:
             submission.queue_new_reports(self.db, self.cfg)
+            # enrich packages (CVSS/CWE/PoC) + autonomously attempt submission.
+            # autosubmit() is token + dry-run gated: with no platform token it just
+            # reports 'skipped'; the instant a real token + enablement exist it fires.
+            for s in submission.list_queue(self.db, "queued", 50):
+                submission.enrich_package(self.db, self.cfg, s["id"])
+                f = self.db.finding(s["finding_id"]) if s.get("finding_id") else None
+                if not f:
+                    continue
+                r = submission.autosubmit(self.cfg, f, s["id"], platform=s.get("platform"))
+                if r.get("status"):
+                    submission.mark_submission(self.db, s["id"], "submitted", r.get("ref"))
+                    print(f"[submission] auto-submitted #{s['id']}: {r.get('ref')}", flush=True)
+                elif r.get("would_submit"):
+                    print(f"[submission] dry-run would-submit #{s['id']}: {r['would_submit']}", flush=True)
         except Exception as e:
-            print("[submission] queue error:", e, flush=True)
+            print("[submission] submit phase error:", e, flush=True)
         return q
 
     # -------------------------------------------------------------- loop
@@ -357,7 +460,18 @@ class AutoBounty:
         print(f"\n=== AutoBounty cycle {self.cycle} "
               f"@ {datetime.datetime.now().isoformat()} ===", flush=True)
         try:
-            self.phase_recon()
+            # recon is the expensive phase (subfinder -all, hours per cycle).
+            # When we already hold hundreds of live hosts that nuclei has never
+            # touched, spend this cycle scanning them instead — otherwise recon
+            # starves the scan phase and no finding is ever produced.
+            unscanned = self.unscanned_live()
+            defer = unscanned >= int(
+                self.cfg["scan"].get("defer_recon_above_unscanned", 150))
+            if defer:
+                print(f"[recon] deferred — {unscanned} live hosts still unscanned; "
+                      f"scanning first", flush=True)
+            else:
+                self.phase_recon()
         except Exception as e:
             self.db.log_run("recon", "error", repr(e))
             print("[recon] ERROR", e, flush=True)
@@ -399,6 +513,17 @@ class AutoBounty:
 
     def run(self, once=False, skip_recon=False):
         self.skip_recon = skip_recon
+
+        def _term(_signum, _frame):
+            # SIGTERM skips Python `finally` blocks, so a running nuclei would be
+            # orphaned and keep scanning the target after this process is gone.
+            # Kill it first, then exit without unwinding (fast, no partial writes).
+            import scan as _scan
+            _scan.kill_current()
+            os._exit(0)
+        signal.signal(signal.SIGTERM, _term)
+        signal.signal(signal.SIGINT, _term)
+
         state_file = os.path.join(self.cfg["runner"].get("state_dir", "data"),
                                   "state.json")
         self.db.import_state(state_file)          # merge progress from other runners
