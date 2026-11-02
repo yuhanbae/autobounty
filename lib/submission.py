@@ -13,7 +13,7 @@ and require the owner's API credentials + an explicit run -- no silent blasting.
 """
 import json, os, re, time, sys
 sys.path.insert(0, os.path.dirname(__file__))
-import money
+import money, enrich
 
 _CVSS_PLACEHOLDER = "<!-- fill after manual CVSS calc -->"
 _CWE_PLACEHOLDER = "<!-- CWE -->"
@@ -116,6 +116,12 @@ def queue_submission(db, cfg, finding):
         sub_dir, f"SUB{_safe(platform)}_{_safe(finding['program'])}_"
                  f"{_safe(str(finding['host']))}_{_safe(finding['template_id'])}.md")
     ev = money.expected_value(cfg, finding)
+    suggestions = enrich.enrich(finding)
+    md = enrich.enrich_package_text(md, suggestions)
+    md += ("\n\n---\n\n### App-submission metadata (AutoBounty *suggested* \u2014 verify before submitting)\n"
+           f"- **Suggested CWE:** {suggestions['cwe']}\n"
+           f"- **Suggested CVSS v3.1:** {suggestions['cvss']}\n"
+           f"- **Suggested PoC / evidence:**\n{suggestions['poc']}\n")
     with open(pkg, "w") as f:
         f.write(f"# {title}\n\nPlatform: {finding.get('platform') or platform} | "
                 f"Program: {finding['program']} | EV(potential): ${ev}\n\n{md}\n")
@@ -171,10 +177,83 @@ def mark_submission(db, sid, status, ext_ref=None, amount_usd=None, note=""):
     return None
 
 
-# ---- optional auto-submit (default OFF) --------------------------------
+# ---- enrichment + money-strict gate ----------------------------------
+def enrich_package(db, cfg, sid):
+    """(Re)fill CVSS/CWE/PoC placeholders in an existing queued package."""
+    row = db.conn.execute("SELECT * FROM submissions WHERE id=?", (sid,)).fetchone()
+    if not row or not row["package_path"] or not os.path.exists(row["package_path"]):
+        return None
+    f = db.finding(row["finding_id"]) if row["finding_id"] else None
+    if not f:
+        return None
+    s = enrich.enrich(f)
+    txt = open(row["package_path"]).read()          # read BEFORE opening 'w' (which truncates)
+    new = enrich.enrich_package_text(txt, s)
+    if new.strip():
+        open(row["package_path"], "w").write(new)
+    return s
+
+
+def qualifies_for_submit(finding):
+    """Money-strict auto gate: only high/critical, and never informational tech noise."""
+    sev = (finding.get("severity") or "").lower()
+    if sev not in ("high", "critical"):
+        return False
+    return money.hard_dedup(None, finding) is None
+
+
+# ---- optional auto-submit (self-activating on a platform token) ----------
+def platform_token(platform):
+    """The moment a real token appears in the environment, that platform can auto-submit."""
+    p = (platform or "").lower()
+    if p == "bugcrowd":
+        return os.environ.get("BUGCROWD_TOKEN")
+    if p == "intigriti":
+        return os.environ.get("INTIGRITI_TOKEN")
+    return None   # hackerone/github -> never auto (no public hunter submission API)
+
+
 def autosubmit_enabled(cfg):
     s = cfg.get("submit", {}) or {}
     return bool(s.get("autosubmit")) and not s.get("dry_run", True)
+
+
+def autosubmit(cfg, finding, sid, platform=None):
+    """Autonomously submit if: a real token exists for the platform AND autosubmit is
+    enabled (autosubmit:true + dry_run:false). Otherwise returns a dry-run plan. Never
+    fabricates a submission — real HTTP requires a real token + enablement."""
+    platform = platform or _platform_of(finding)
+    if platform not in ("bugcrowd", "intigriti"):
+        return {"skipped": f"{platform} has no public hunter submission API "
+                           f"— human submits via /submit"}
+    tok = platform_token(platform)
+    title, md = format_submission(cfg, finding)
+    payload = {"title": title, "markdown": md, "finding": finding}
+    if not tok:
+        return {"skipped": f"no {platform} token in env — set {platform.upper()}_TOKEN to enable"}
+    if not qualifies_for_submit(finding):
+        return {"skipped": "below money-strict threshold (needs high/critical, dedup-clean)"}
+    if not autosubmit_enabled(cfg):
+        return {"dry_run": True, "would_submit": title, "platform": platform,
+                "note": "autosubmit requires submit.autosubmit:true + dry_run:false"}
+    if platform == "bugcrowd":
+        return submit_bugcrowd(cfg, payload, {"bugcrowd_token": tok})
+    if platform == "intigriti":
+        return submit_intigriti(cfg, payload, {"intigriti_token": tok})
+    return {"skipped": f"{platform} has no public hunter submission API — human submits"}
+
+
+def submit_intigriti(cfg, payload, creds):
+    import requests
+    if not autosubmit_enabled(cfg):
+        return {"dry_run": True, "would_submit": payload.get("title")}
+    tok = creds.get("intigriti_token")
+    if not tok:
+        return {"error": "missing intigriti_token"}
+    r = requests.post("https://api.intigriti.com/core/researcher/submission",
+        headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
+        json={"title": payload["title"], "description": payload["markdown"]}, timeout=30)
+    return {"status": r.status_code, "ref": r.text[:200]}
 
 
 def submit_bugcrowd(cfg, payload, creds):
